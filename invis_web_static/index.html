@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Переписка без «в сети»</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; background: #1a1a2e; color: #eee; min-height: 100vh; }
+    .container { max-width: 900px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 1.25rem; margin: 0 0 16px; color: #a0a0ff; }
+    .login-box { text-align: center; padding: 48px 24px; }
+    .login-box p { margin-bottom: 16px; opacity: 0.9; }
+    .chats-layout { display: flex; gap: 16px; height: calc(100vh - 100px); }
+    .chats-sidebar { width: 280px; flex-shrink: 0; background: #16213e; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+    .chats-sidebar h2 { margin: 0; padding: 12px 16px; font-size: 0.95rem; border-bottom: 1px solid #2a2a4a; }
+    .chats-list { flex: 1; overflow-y: auto; }
+    .chat-item { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #2a2a4a; transition: background 0.15s; }
+    .chat-item:hover { background: #1f2b4a; }
+    .chat-item.active { background: #2a2a5a; }
+    .chat-item .title { font-weight: 500; }
+    .chat-item .meta { font-size: 0.8rem; opacity: 0.7; margin-top: 4px; }
+    .chat-main { flex: 1; display: flex; flex-direction: column; background: #16213e; border-radius: 12px; overflow: hidden; min-width: 0; }
+    .chat-header { padding: 12px 16px; border-bottom: 1px solid #2a2a4a; font-weight: 500; }
+    .messages-area { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+    .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; font-size: 0.95rem; }
+    .msg.mine { align-self: flex-end; background: #3d5a80; }
+    .msg.theirs { align-self: flex-start; background: #2a2a4a; }
+    .msg .time { font-size: 0.75rem; opacity: 0.7; margin-top: 4px; }
+    .send-row { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #2a2a4a; }
+    .send-row input { flex: 1; padding: 10px 14px; border: 1px solid #2a2a4a; border-radius: 8px; background: #1a1a2e; color: #eee; font-size: 1rem; }
+    .send-row input::placeholder { color: #666; }
+    .send-row button { padding: 10px 20px; border: none; border-radius: 8px; background: #3d5a80; color: #fff; font-weight: 500; cursor: pointer; }
+    .send-row button:hover { background: #4d6a90; }
+    .send-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error { color: #ff6b6b; padding: 8px; font-size: 0.9rem; }
+    .widget-hint { font-size: 0.8rem; color: #888; margin-top: 12px; max-width: 420px; margin-left: auto; margin-right: auto; line-height: 1.4; }
+    .hidden { display: none !important; }
+    .logout { margin-top: 16px; font-size: 0.9rem; color: #888; cursor: pointer; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="loginView" class="login-box">
+      <h1>Переписка без «в сети»</h1>
+      <p>Войдите через Telegram. Сообщения будут приходить сюда, а ответы — отправляться от вашего имени, при этом в Telegram вы не будете отображаться «в сети».</p>
+      <div id="loginWidget">
+        <script async src="https://telegram.org/js/telegram-widget.js?22" data-telegram-login="__BOT_USERNAME__" data-size="large" data-onauth="onTelegramAuth(user)" data-request-access="write"></script>
+      </div>
+      <p class="widget-hint">Если кнопка не видна: открывайте сайт по <strong>HTTPS</strong> и укажите этот домен в @BotFather (Bot Settings → Domain). По IP (172.16.0.2) и HTTP виджет не работает.</p>
+      <div class="error hidden" id="loginError"></div>
+      <p class="logout hidden" id="logoutBtn">Выйти</p>
+    </div>
+    <div id="appView" class="hidden">
+      <h1>Переписка без «в сети» <span class="logout" id="logoutBtnApp" style="font-size:0.9rem;margin-left:12px;">Выйти</span></h1>
+      <div class="chats-layout">
+        <div class="chats-sidebar">
+          <h2>Чаты</h2>
+          <div class="chats-list" id="chatsList"></div>
+        </div>
+        <div class="chat-main">
+          <div class="chat-header" id="chatHeader">Выберите чат</div>
+          <div class="messages-area" id="messagesArea"></div>
+          <div class="send-row hidden" id="sendRow">
+            <input type="text" id="messageInput" placeholder="Сообщение..." autocomplete="off">
+            <button type="button" id="sendBtn">Отправить</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const API = window.location.origin;
+    let token = localStorage.getItem('invis_token');
+    let currentChatId = null;
+    let pollInterval = null;
+
+    function show(el) { el.classList.remove('hidden'); }
+    function hide(el) { el.classList.add('hidden'); }
+    function setError(msg) {
+      const el = document.getElementById('loginError');
+      el.textContent = msg || '';
+      msg ? show(el) : hide(el);
+    }
+
+    window.onTelegramAuth = async function(user) {
+      setError('');
+      const r = await fetch(API + '/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(user)
+      });
+      const data = await r.json();
+      if (!data.ok) {
+        if (data.error === 'no_business_connection') setError('Подключите бота в Telegram (Бизнес-режим / Business Connection).');
+        else setError('Ошибка входа.');
+        return;
+      }
+      token = data.token;
+      localStorage.setItem('invis_token', token);
+      showApp();
+    };
+
+    function showApp() {
+      hide(document.getElementById('loginView'));
+      show(document.getElementById('appView'));
+      loadChats();
+    }
+
+    function logout() {
+      token = null;
+      localStorage.removeItem('invis_token');
+      show(document.getElementById('loginView'));
+      hide(document.getElementById('appView'));
+      setError('');
+      if (pollInterval) clearInterval(pollInterval);
+    }
+
+    document.getElementById('logoutBtn').onclick = logout;
+    document.getElementById('logoutBtnApp').onclick = logout;
+
+    async function loadChats() {
+      const r = await fetch(API + '/api/chats', { headers: { 'Authorization': 'Bearer ' + token } });
+      if (r.status === 401) { logout(); return; }
+      const data = await r.json();
+      if (!data.ok) return;
+      const list = document.getElementById('chatsList');
+      list.innerHTML = '';
+      data.chats.forEach(c => {
+        const div = document.createElement('div');
+        div.className = 'chat-item';
+        div.dataset.chatId = c.chat_id;
+        div.innerHTML = '<span class="title">' + escapeHtml(c.chat_title) + '</span><div class="meta">' + (c.last_message_type || '') + '</div>';
+        div.onclick = () => selectChat(c.chat_id, c.chat_title);
+        list.appendChild(div);
+      });
+    }
+
+    function escapeHtml(s) {
+      if (!s) return '';
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    function selectChat(chatId, title) {
+      currentChatId = chatId;
+      document.getElementById('chatHeader').textContent = title;
+      document.querySelectorAll('.chat-item').forEach(el => { el.classList.toggle('active', parseInt(el.dataset.chatId) === chatId); });
+      show(document.getElementById('sendRow'));
+      loadMessages(chatId);
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(() => loadMessages(chatId, true), 3000);
+    }
+
+    async function loadMessages(chatId, silent) {
+      const r = await fetch(API + '/api/chats/' + chatId + '/messages', { headers: { 'Authorization': 'Bearer ' + token } });
+      if (r.status === 401) { logout(); return; }
+      const data = await r.json();
+      if (!data.ok) return;
+      const area = document.getElementById('messagesArea');
+      area.innerHTML = '';
+      data.messages.forEach(m => {
+        const div = document.createElement('div');
+        const isMine = (m.sender_type || '').indexOf('Ваше') !== -1;
+        div.className = 'msg ' + (isMine ? 'mine' : 'theirs');
+        const text = m.message_type === 'text' ? (m.content || '') : (m.message_type + (m.caption ? ': ' + m.caption : ''));
+        div.innerHTML = '<div>' + escapeHtml(text) + '</div><div class="time">' + escapeHtml(m.time_formatted || '') + '</div>';
+        area.appendChild(div);
+      });
+      area.scrollTop = area.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById('messageInput');
+      const text = (input.value || '').trim();
+      if (!text || !currentChatId) return;
+      const btn = document.getElementById('sendBtn');
+      btn.disabled = true;
+      const r = await fetch(API + '/api/chats/' + currentChatId + '/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ text: text })
+      });
+      btn.disabled = false;
+      if (r.ok) {
+        input.value = '';
+        loadMessages(currentChatId);
+      }
+    }
+
+    document.getElementById('sendBtn').onclick = sendMessage;
+    document.getElementById('messageInput').onkeydown = function(e) { if (e.key === 'Enter') sendMessage(); };
+
+    (async function() {
+      if (token) {
+        const r = await fetch(API + '/api/chats', { headers: { 'Authorization': 'Bearer ' + token } });
+        if (r.ok) showApp();
+        else logout();
+      }
+    })();
+  </script>
+</body>
+</html>
